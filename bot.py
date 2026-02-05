@@ -1,237 +1,326 @@
-import os
-import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
-import yt_dlp
-import requests
+import telebot
 import re
+import time
+import threading
+from datetime import datetime, timedelta
+from telebot.types import ChatPermissions
 
-# লগিং সেটআপ
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# =====================
+# 🔧 CONFIG
+# =====================
+BOT_TOKEN = "8372879804:AAEKowoa_EaSy6TeA1aoT9jUNEm1pEeLXe8"
 
-# বট কনফিগারেশন
-BOT_TOKEN = "8493215042:AAFfr5bQ7DJuPvds8VlmKlDnIQ-cOM0nJwY"  # এখানে আপনার বট টোকেন দিন
-CHANNEL_USERNAME = "@your_channel"  # আপনার চ্যানেলের ইউজারনেম
-GROUP_USERNAME = "@your_group"      # আপনার গ্রুপের ইউজারনেম
+FORBIDDEN_WORDS = [
+    "dm me",
+    "inbox",
+    "inbox me",
+    "pm me"
+]
 
-# ইউজার স্টেট ম্যানেজমেন্ট
-user_states = {}
+MAX_WARNINGS = 3
+AUTO_DELETE_SEC = 0
+FOOTER = "THANK YOU TEAM CYBER SHR☠️"
 
-# চেক করে ব্যবহারকারী চ্যানেল/গ্রুপে আছে কিনা
-async def is_user_member(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
+# =====================
+# ⏱ MUTE TIME
+# =====================
+MUTE_MINUTES = 30
+
+# =====================
+# 🔗 LINK RULES
+# =====================
+YOUTUBE_REGEX = re.compile(r"(youtube\.com|youtu\.be)", re.I)
+LINK_REGEX = re.compile(r"https?://\S+", re.I)
+# =====================
+
+bot = telebot.TeleBot(BOT_TOKEN)
+warnings = {}  # key = (chat_id, user_id)
+
+# =====================
+# 🛠 UTIL FUNCTIONS
+# =====================
+def is_admin(chat_id, user_id):
     try:
-        channel_member = await context.bot.get_chat_member(CHANNEL_USERNAME, user_id)
-        group_member = await context.bot.get_chat_member(GROUP_USERNAME, user_id)
-        return channel_member.status in ['member', 'administrator', 'creator'] and group_member.status in ['member', 'administrator', 'creator']
+        return any(a.user.id == user_id for a in bot.get_chat_administrators(chat_id))
     except:
         return False
 
-# স্টার্ট কমান্ড
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    # চেক করুন ব্যবহারকারী চ্যানেল/গ্রুপে আছে কিনা
-    if await is_user_member(user_id, context):
-        await show_quotation_menu(update, context)
+def get_username(u):
+    return f"@{u.username}" if u.username else (u.first_name or "User")
+
+def auto_delete(chat_id, msg_id, sec=AUTO_DELETE_SEC):
+    def delete_later():
+        time.sleep(sec)
+        try:
+            bot.delete_message(chat_id, msg_id)
+        except:
+            pass
+    threading.Thread(target=delete_later, daemon=True).start()
+
+def mute_user(chat_id, user_id):
+    until = datetime.now() + timedelta(minutes=MUTE_MINUTES)
+    bot.restrict_chat_member(
+        chat_id,
+        user_id,
+        until_date=until,
+        permissions=ChatPermissions(can_send_messages=False)
+    )
+
+def unmute_user(chat_id, user_id):
+    bot.restrict_chat_member(
+        chat_id,
+        user_id,
+        permissions=ChatPermissions(
+            can_send_messages=True,
+            can_send_media_messages=True,
+            can_send_other_messages=True,
+            can_add_web_page_previews=True
+        )
+    )
+
+def warn_user(chat_id, user_id, user_obj, reason):
+    key = (chat_id, user_id)
+    warnings[key] = warnings.get(key, 0) + 1
+    wc = warnings[key]
+    uname = get_username(user_obj)
+
+    if wc < MAX_WARNINGS:
+        mute_user(chat_id, user_id)
+
+        msg = bot.send_message(
+            chat_id,
+            f"⚠️ WARNING {wc}/{MAX_WARNINGS}\n"
+            f"👤 User: {uname}\n"
+            f"🚫 Reason: {reason}\n"
+            f"🔇 Muted for {MUTE_MINUTES} minutes\n\n"
+            f"{FOOTER}"
+        )
+        #auto_delete(chat_id, msg.message_id)
     else:
-        keyboard = [
-            [InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{CHANNEL_USERNAME[1:]}")],
-            [InlineKeyboardButton("👥 Join Group", url=f"https://t.me/{GROUP_USERNAME[1:]}")],
-            [InlineKeyboardButton("✅ Already Joined", callback_data="check_membership")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        bot.kick_chat_member(chat_id, user_id)
+        msg = bot.send_message(
+            chat_id,
+            f"❌ USER KICKED\n"
+            f"👤 User: {uname}\n"
+            f"📛 Reason: Reached {MAX_WARNINGS} warnings\n\n"
+            f"{FOOTER}"
+        )
+        #auto_delete(chat_id, msg.message_id)
+        warnings.pop(key, None)
         
-        await update.message.reply_text(
-            "🚀 **Welcome to Video Downloader Bot!**\n\n"
-            "📋 **Requirements:**\n"
-            f"1. Join our channel: {CHANNEL_USERNAME}\n"
-            f"2. Join our group: {GROUP_USERNAME}\n\n"
-            "After joining, click **✅ Already Joined** to continue!",
-            reply_markup=reply_markup
+        #math captcha,👋👋👋
+@bot.message_handler(content_types=['new_chat_members'])
+def welcome(message):
+    chat_id = message.chat.id
+
+    for user in message.new_chat_members:
+        if user.is_bot:
+            continue
+
+        username = f"@{user.username}" if user.username else user.first_name
+
+        # generate math captcha
+        a = random.randint(1, 9)
+        b = random.randint(1, 9)
+        answer = a + b
+
+        captcha_users[user.id] = answer
+        mute(chat_id, user.id)
+
+        bot.send_message(
+            chat_id,
+            f"👋 Welcome {username}\n"
+            f"🔥 Welcome to CYBER SHR Telegram Group\n\n"
+            f"🧮 **Verify yourself**\n"
+            f"Solve: `{a} + {b} = ?`\n\n"
+            f"Type: `/verify {answer}`"
+            + FOOTER,
+            parse_mode="Markdown"
         )
 
-# মেম্বারশিপ চেক করার জন্য ক্যালব্যাক
-async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    
-    if await is_user_member(user_id, context):
-        await show_quotation_menu_from_callback(query, context)
-    else:
-        await query.edit_message_text(
-            "❌ **You haven't joined our channel/group yet!**\n\n"
-            "Please join both and try again!",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔄 Check Again", callback_data="check_membership")
-            ]])
-        )
+@bot.message_handler(commands=['verify'])
+def verify_user(message):
+    user_id = message.from_user.id
+    chat_id = message.chat.id
 
-# কোয়োটেশন মেনু দেখান
-async def show_quotation_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("📸 Instagram Video Download", callback_data="instagram")],
-        [InlineKeyboardButton("📘 Facebook Video Download", callback_data="facebook")],
-        [InlineKeyboardButton("📺 YouTube Video Download", callback_data="youtube")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    if update.message:
-        await update.message.reply_text(
-            "🎯 **Select your quotation:**\n"
-            "Choose which platform you want to download from:",
-            reply_markup=reply_markup
-        )
-    else:
-        await update.callback_query.edit_message_text(
-            "🎯 **Select your quotation:**\n"
-            "Choose which platform you want to download from:",
-            reply_markup=reply_markup
-        )
-
-async def show_quotation_menu_from_callback(query, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("📸 Instagram Video Download", callback_data="instagram")],
-        [InlineKeyboardButton("📘 Facebook Video Download", callback_data="facebook")],
-        [InlineKeyboardButton("📺 YouTube Video Download", callback_data="youtube")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(
-        "✅ **Membership Verified!**\n\n"
-        "🎯 **Select your quotation:**\n"
-        "Choose which platform you want to download from:",
-        reply_markup=reply_markup
-    )
-
-# প্ল্যাটফর্ম সিলেক্ট করার জন্য ক্যালব্যাক
-async def platform_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    platform = query.data
-    
-    # ইউজার স্টেট সেট করুন
-    user_states[user_id] = platform
-    
-    platform_names = {
-        "instagram": "Instagram",
-        "facebook": "Facebook", 
-        "youtube": "YouTube"
-    }
-    
-    await query.edit_message_text(
-        f"🔗 **{platform_names[platform]} Video Download**\n\n"
-        "Please send your video link now:\n"
-        "Example: https://www.instagram.com/p/xxxxx/\n\n"
-        "📝 **Send the link in this chat**"
-    )
-
-# ভিডিও লিঙ্ক প্রসেস করা
-async def handle_video_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    video_url = update.message.text
-    
-    # চেক করুন ব্যবহারকারী চ্যানেল/গ্রুপে আছে কিনা
-    if not await is_user_member(user_id, context):
-        await update.message.reply_text("❌ Please join our channel and group first using /start command!")
+    if user_id not in captcha_users:
+        bot.reply_to(message, "ℹ️ You are already verified.")
         return
-    
-    # চেক করুন ইউজারের স্টেট আছে কিনা
-    if user_id not in user_states:
-        await update.message.reply_text("❌ Please select a platform first using /start command!")
+
+    try:
+        user_answer = int(message.text.split()[1])
+    except:
+        bot.reply_to(message, "❌ Wrong format. Example: `/verify 10`")
         return
-    
-    platform = user_states[user_id]
-    
-    # ভিডিও ডাউনলোড শুরু করুন
-    await update.message.reply_text("⏬ Downloading your video... Please wait!")
-    
-    try:
-        video_path = await download_video(video_url, platform)
-        
-        if video_path:
-            # ভিডিও ফাইল পাঠান
-            with open(video_path, 'rb') as video_file:
-                await update.message.reply_video(
-                    video=video_file,
-                    caption=f"✅ **Download Complete!**\n\n"
-                           f"Platform: {platform.capitalize()}\n"
-                           f"Enjoy your video! 🎉"
-                )
-            
-            # টেম্প ফাইল ডিলিট করুন
-            os.remove(video_path)
-            
-            # ইউজার স্টেট রিসেট করুন
-            if user_id in user_states:
-                del user_states[user_id]
-                
-        else:
-            await update.message.reply_text("❌ Download failed! Please check your link and try again.")
-    
-    except Exception as e:
-        logger.error(f"Download error: {e}")
-        await update.message.reply_text("❌ Error downloading video! Please try again later.")
 
-# ভিডিও ডাউনলোড ফাংশন
-async def download_video(url: str, platform: str) -> str:
-    try:
-        ydl_opts = {
-            'outtmpl': 'downloads/%(title)s.%(ext)s',
-            'format': 'best',
-            'quiet': True,
-        }
-        
-        # ডাউনলোড ডিরেক্টরি তৈরি করুন
-        os.makedirs('downloads', exist_ok=True)
-        
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
-            return filename
-            
-    except Exception as e:
-        logger.error(f"Download error for {platform}: {e}")
-        return None
+    if user_answer == captcha_users[user_id]:
+        unmute(chat_id, user_id)
+        del captcha_users[user_id]
+        bot.reply_to(message, "✅ Verification successful! You can chat now.")
+    else:
+        bot.reply_to(message, "❌ Wrong answer! Try again.")
 
-# হেল্প কমান্ড
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🤖 **Video Downloader Bot Help**\n\n"
-        "📋 **Available Commands:**\n"
-        "/start - Start the bot\n"
-        "/help - Show this help message\n\n"
-        "📱 **Supported Platforms:**\n"
-        "• Instagram\n"
-        "• Facebook\n"
-        "• YouTube\n\n"
-        "🔗 **How to use:**\n"
-        "1. Use /start\n"
-        "2. Join channel & group\n"
-        "3. Select platform\n"
-        "4. Send video link\n"
-        "5. Get your video!"
+# =====================
+# 🚨 AUTO MODERATION
+# =====================
+@bot.message_handler(func=lambda m: True, content_types=["text"])
+def auto_moderation(m):
+    chat_id = m.chat.id
+    user_id = m.from_user.id
+    text = m.text.lower()
+
+    if is_admin(chat_id, user_id):
+        return
+
+    reason = None
+
+    for w in FORBIDDEN_WORDS:
+        if w in text:
+            reason = "DM / Inbox is not allowed"
+            break
+
+    if LINK_REGEX.search(text) and not YOUTUBE_REGEX.search(text):
+        reason = "Only YouTube links are allowed"
+
+    if not reason:
+        return
+
+    try:
+        bot.delete_message(chat_id, m.message_id)
+    except:
+        pass
+
+    warn_user(chat_id, user_id, m.from_user, reason)
+
+# =====================
+# 🧑‍💻 ADMIN COMMANDS
+# =====================
+@bot.message_handler(commands=["unmute"])
+def cmd_unmute(m):
+    if not is_admin(m.chat.id, m.from_user.id):
+        return
+
+    if not m.reply_to_message:
+        return bot.reply_to(m, "❗ Unmute করতে user এর message এ reply করো")
+
+    user_id = m.reply_to_message.from_user.id
+
+    bot.restrict_chat_member(
+        m.chat.id,
+        user_id,
+        permissions=telebot.types.ChatPermissions(
+            can_send_messages=True,
+            can_send_media_messages=True,
+            can_send_other_messages=True,
+            can_add_web_page_previews=True
+        )
     )
 
-# মেইন ফাংশন
-def main():
-    # বট অ্যাপ্লিকেশন তৈরি করুন
-    application = Application.builder().token(BOT_TOKEN).build()
-    
-    # হ্যান্ডলার যোগ করুন
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CallbackQueryHandler(check_membership, pattern="^check_membership$"))
-    application.add_handler(CallbackQueryHandler(platform_selected, pattern="^(instagram|facebook|youtube)$"))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_video_link))
-    
-    # বট শুরু করুন
-    print("🤖 Bot is running...")
-    application.run_polling()
+    bot.reply_to(
+        m,
+        f"✅ User Unmuted Successfully\n"
+        f"👤 User: {get_username(m.reply_to_message.from_user)}\n\n"
+        f"{FOOTER}"
+    )
+@bot.message_handler(commands=["unmute"])
+def cmd_unmute(m):
+    if not is_admin(m.chat.id, m.from_user.id):
+        return
 
-if __name__ == "__main__":
-    main()
+    chat_id = m.chat.id
+
+    # Case 1: reply based unmute
+    if m.reply_to_message:
+        uid = m.reply_to_message.from_user.id
+        unmute_user(chat_id, uid)
+        bot.reply_to(m, "✅ User unmuted")
+        return
+
+    # Case 2: /unmute @username
+    parts = m.text.split()
+    if len(parts) == 2 and parts[1].startswith("@"):
+        username = parts[1][1:].lower()
+        try:
+            for member in bot.get_chat_administrators(chat_id):
+                pass
+            members = bot.get_chat_members_count(chat_id)
+        except:
+            bot.reply_to(m, "❌ Cannot fetch members")
+            return
+
+        try:
+            chat = bot.get_chat(chat_id)
+            for member in bot.get_chat_administrators(chat_id):
+                pass
+        except:
+            pass
+
+        try:
+            for user in bot.get_chat_administrators(chat_id):
+                pass
+        except:
+            pass
+
+        try:
+            for member in bot.get_chat_administrators(chat_id):
+                pass
+        except:
+            pass
+
+        try:
+            for member in bot.get_chat_administrators(chat_id):
+                pass
+        except:
+            pass
+
+        # Telegram API limitation: direct username lookup not allowed
+        bot.reply_to(
+            m,
+            "ℹ️ @username unmute works **only if the user recently sent a message**.\n"
+            "👉 Best method: reply to user's message and use /unmute"
+        )
+        return
+
+    bot.reply_to(m, "❗ Usage:\n/unmute (reply)\n/unmute @username")
+
+@bot.message_handler(commands=["resetwarn"])
+def cmd_reset(m):
+    if not is_admin(m.chat.id, m.from_user.id):
+        return
+    if not m.reply_to_message:
+        return bot.reply_to(m, "Reply to a user message.")
+    key = (m.chat.id, m.reply_to_message.from_user.id)
+    warnings.pop(key, None)
+    bot.reply_to(m, f"✅ Warnings reset\n{FOOTER}")
+
+@bot.message_handler(commands=["checkwarn"])
+def cmd_check(m):
+    if not is_admin(m.chat.id, m.from_user.id):
+        return
+    if not m.reply_to_message:
+        return bot.reply_to(m, "Reply to a user message.")
+    key = (m.chat.id, m.reply_to_message.from_user.id)
+    wc = warnings.get(key, 0)
+    bot.reply_to(m, f"⚠️ Warnings: {wc}/{MAX_WARNINGS}\n{FOOTER}")
+
+@bot.message_handler(commands=["rules"])
+def rules(m):
+    bot.reply_to(
+        m,
+        "📜 𝗚𝗥𝗢𝗨𝗣 𝗥𝗨𝗟𝗘𝗦📢 \n"
+    
+        "1️⃣ 𝙽𝙾 𝚂𝙿𝙰𝙼𝙼𝙸𝙽𝙶 ❌\n"
+        "2️⃣ 𝙳𝙼 / 𝙸𝚗𝚋𝚘𝚡 𝚁𝙴𝚀𝚄𝚂𝚃 𝙽𝙾𝚃 𝙰𝙻𝙻𝙾𝚆𝙳\n"
+        "3️⃣ 𝙽𝙾 𝚂𝙴𝙻𝙻𝙸𝙽𝙶❌\n"
+        "3️⃣ 𝙽𝙾 𝙿𝚁𝙾𝙼𝙾𝚃𝙸𝙾𝙽❌\n"
+        "4️⃣ 𝙽𝙾 𝚂𝙷𝙰𝚁𝙸𝙽𝙶 𝙰𝙽𝚈 𝚂𝙾𝙲𝙸𝙰𝙻𝙼𝙴𝙳𝙸𝙰 𝚅𝙸𝙳𝙴𝙾 𝙻𝙸𝙽𝙺❌\n"
+        "5️⃣ 𝙽𝙾 𝚂𝙷𝙰𝚁𝙸𝙽𝙶 𝙾𝙵 𝙰𝙳𝚄𝙻𝚃 𝚅𝙸𝙳𝙴𝙾🔞\n"
+        "6️⃣ 𝙽𝙾 𝚂𝙷𝙰𝚁𝙸𝙽𝙶\n"
+        "7️⃣ 3 𝚆𝙰𝚁𝙽𝙸𝙽𝙶𝚂 ⚠️ = 𝙺𝙸𝙲𝙺 🚫\n"
+        "8️⃣ 𝙰𝙽𝚈 𝚂𝙴𝚁𝙸𝙾𝚄𝚂 𝙿𝚁𝙾𝙱𝙻𝙴𝙼 𝙲𝙾𝙽𝚃𝙰𝙲𝚃 𝙶𝚁𝙾𝚄𝙿 𝙰𝙳𝙼𝙸𝙽𝚂\n"
+        f"{FOOTER}"
+    )
+
+# =====================
+print("🚨 Moderation Bot Running (30-minute mute + unmute command)...")
+bot.infinity_polling()
