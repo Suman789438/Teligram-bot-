@@ -8,7 +8,7 @@ from telebot.types import ChatPermissions
 # =====================
 # 🔧 CONFIG
 # =====================
-BOT_TOKEN = "8372879804:AAEKowoa_EaSy6TeA1aoT9jUNEm1pEeLXe8"
+BOT_TOKEN = ""
 
 FORBIDDEN_WORDS = [
     "dm me",
